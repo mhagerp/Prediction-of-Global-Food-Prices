@@ -15,8 +15,8 @@ getSymbols("^SP500-302020",
            to = "2020-12-31")
 
 
-# Retrieve the data from quantmod (assuming it's already in an xts object)
-stock_data <- Cl(`SP500-302020`)  # Get the closing prices as an xts object
+# Get the closing prices as an xts object
+stock_data <- Cl(`SP500-302020`)  
 
 # Create a complete time sequence including weekends
 all_dates <- seq.Date(from = as.Date("2003-01-02"), to = as.Date("2020-12-31"), by = "day")
