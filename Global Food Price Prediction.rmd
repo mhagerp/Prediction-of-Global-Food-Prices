@@ -1,0 +1,545 @@
+---
+title: "Global Food Price Prediction"
+author: "Jaimie Cairns, Dustin Cole, Morgan Hager-Perry"
+date: "2025-03-26"
+output:
+  tufte::tufte_html:
+    tufte_features: ["fonts", "italics"]
+    df_print: paged
+    toc: true # table of content true
+    toc_depth: 3  # upto three depths of headings (specified by #, ## and ###)
+    number_sections: false
+  tufte::tufte_handout: default
+  html_document:
+    df_print: paged
+    toc: true 
+    toc_depth: 3  
+    number_sections: true  
+    theme: united  
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tufte)
+library(feasts)
+library(tidyverse)
+library(fpp3)
+library(urca)
+library(fracdiff)
+library(glue)
+library(GGally)
+library(nycflights13)
+library(dplyr)
+
+library(quantmod)
+library(zoo) 
+library(tsibble)
+
+library(forecast)
+library(randomForest)
+library(gridExtra)
+library(Metrics)
+library(vars)
+library(ggplot2)
+```
+
+# Food Prices Dataset
+
+## Time series decomposition
+
+### Import Data
+
+```{r}
+
+#Data from Bureau of Labor Statistics:  Food and beverages in U.S. city average, all urban consumers, not seasonally adjusted. Downloaded all monthly data from 1967 forward from https://data.bls.gov/dataViewer/view/timeseries/CUUR0000SAF;jsessionid=40005007FB9F133245ECFC6162596EB0
+
+#input the data, mutate the time column to yearmonth and convert to a tsibble
+food_prices <- readr::read_csv("file.csv", show_col_types=FALSE) |>
+  mutate(Month=yearmonth(Label))|> 
+  filter(year(Month)>1999)|>
+  dplyr::select(Month, Value) |>
+  as_tsibble(index=Month)
+
+food_prices<-na.locf(food_prices)
+#View tsibble
+print(food_prices)
+```
+
+### Classic Addditive Decomposition
+
+```{r}
+food_prices |>
+  model(
+    classical_decomposition(Value, type = "additive")
+  ) |>
+  components() |>
+  autoplot() +
+  labs(title = "Classical additive decomposition of US Food & Beverage Prices")
+```
+
+## Time series Visualization
+
+### Visualizations: Not adjusted for inflation 
+
+#### Time Plot
+
+```{r}
+food_prices|>
+  autoplot(Value) + 
+  labs( y="US Dollar", title="US Food Prices")
+```
+
+#### Autocorrelation Function
+
+```{r}
+food_prices|>
+  ACF(Value)|>
+  autoplot() +labs(title="US Food Prices ACF")
+```
+
+#### Seasonal Plot
+```{r}
+food_prices|>
+  gg_season(Value, labels="both")+
+  labs(y="US $", title="Seasonal plot: US Food and Beverage Prices")
+```
+
+#### Seasonal subseries plot
+```{r}
+food_prices |>
+  gg_subseries(Value)+
+  labs(y = "US$", title="US Food and Beverage Costs")
+```
+
+
+### Visualizations: Inflation Adjusted
+
+
+```{r}
+
+#import CPI data for US economy from BLS: 
+#https://fred.stlouisfed.org/series/CPIAUCNS
+
+us_economy <- readr::read_csv("CPIAUCNS.csv", show_col_types=FALSE) |>
+  mutate(Month=yearmonth(observation_date))|> 
+  filter(year(Month)>2000)|>
+  dplyr::select(CPIAUCNS, Month) |>
+  as_tsibble(index=Month)
+
+print(us_economy)
+```
+### Time Plot Inflation Adjusted vs. Non-Adjusted
+
+```{r}
+food_prices|>
+  left_join(us_economy, by="Month") |>
+  mutate(Adjusted_Value= Value/CPIAUCNS *100) |>
+  pivot_longer(c(Value, Adjusted_Value), values_to="Value")|>
+  mutate(name=factor(name, 
+                     levels=c("Value","Adjusted_Value"))) |>
+  ggplot(aes(x=Month, y=Value))+
+  geom_line()+
+  facet_grid(name ~.,scales="free_y")+
+  labs(title="US Food & Beverage Prices",y="US$")
+```
+### Seasonal Plot Inflation Adjusted
+
+```{r}
+#created adjusted food price tsibble
+food_prices_adj<-food_prices|>
+  left_join(us_economy, by="Month") |>
+  mutate(Adjusted_Value= Value/CPIAUCNS *100) |>
+  dplyr::select(Adjusted_Value,Month)
+
+#remove nas
+food_prices_adj<-na.locf(food_prices_adj)
+
+#seasonal plot of adjusted food prices
+
+food_prices_adj|>
+  gg_season(Adjusted_Value, labels="both")+
+  labs(y="US $", title="Seasonal plot: US Food and Beverage Prices")
+```
+### Autocorrelation Function Inflation Adjusted
+
+```{r}
+food_prices_adj|>
+  ACF(Adjusted_Value)|>
+  autoplot() +labs(title="US Food Prices ACF")
+```
+
+#### Seasonal subseries plot
+```{r}
+food_prices_adj |>
+  gg_subseries(Adjusted_Value)+
+  labs(y = "US$", title="US Food and Beverage Costs")
+```
+
+### Decomposition of Inflation Adjusted Data
+
+```{r}
+food_prices_adj |>
+  model(
+    classical_decomposition(Adjusted_Value, type = "additive")
+  ) |>
+  components() |>
+  autoplot() +
+  labs(title = "Classical additive decomposition of Inflation Adjusted US Food & Beverage Prices")
+```
+
+## Description of Food Prices time series
+
+The US Food and Beverage dataset shows a clear upward trend in the cost of food and beverages from 2000 to present. In looking at the unadjusted data the trend appears significant and constant; however, when data is adjusted for inflation the trend is still upward but appears to have more cyclical movement.
+
+While the decomposition graphs of both the unadjusted and adjusted data show what appears to be significant seasonality in the data, the seasonality is somewhat minor. When the seasonal subseries plot is looked at in the unadjusted data, there appears to be almost no variation in monthly costs even though you would expect to see that with seasonally impacted data. The seasonality is a bit more noticeable when the seasonal subseries plot is shown for the adjusted for inflation data. Here it becomes apparent that food costs are lower in the summer months and higher in the winter months.
+
+
+# Stock Index Dataset
+
+## Import and set up
+```{r}
+#pulling the stock ticker for SP500 Food Products Index - Same time range as other dataset
+getSymbols("^SP500-302020",
+           src="yahoo",
+           from = "2000-01-07",
+           to = "2025-01-31")
+
+
+# Get the closing prices as an xts object
+stock_data <- Cl(`SP500-302020`)  
+
+# Create a complete time sequence including weekends
+all_dates <- seq.Date(from = as.Date("2000-01-07"), to = as.Date("2025-01-31"), by = "day")
+stock_data_full <- merge(stock_data, xts(, all_dates))  # Merge with full date sequence
+
+#adjusting the column names 
+colnames(stock_data_full) <- c("Close")
+
+# Check the result
+head(stock_data_full)
+```
+### Fill missing values
+```{r}
+# Forward fill the missing values
+stock_data_filled <- na.locf(stock_data_full)
+
+# View the data after filling missing values
+head(stock_data_filled)
+```
+### plotting the time series
+```{r}
+plot(stock_data_filled)
+```
+## Additive Decomposition Plot
+
+```{r}
+SP500_ts <- ts(stock_data_filled,frequency=365)
+plot(decompose(SP500_ts))
+```
+
+## Visualizations
+### Visualization 1 - Trend
+```{r}
+SP500_ts.decom <- decompose(SP500_ts, type = "mult")
+plot(SP500_ts.decom)
+Trend <- SP500_ts.decom$trend
+Seasonal <- SP500_ts.decom$seasonal
+ts.plot(cbind(Trend, Trend * Seasonal), lty=1:2)
+```
+
+### Visualization 2 - ACF Plot
+```{r}
+acf(SP500_ts)
+```
+
+### Visualization 3 - Seasonality
+```{r}
+# Convert xts to tsibble
+df <- data.frame(Date = zoo::index(stock_data_filled), Close = zoo::coredata(stock_data_filled))
+tsibble_data <- as_tsibble(df, index = Date)
+
+#plot the seasonality chart
+tsibble_data %>%
+  gg_season(Close, labels = "both") +
+  labs(y = "Closing Price ($)",
+       title = "Seasonal plot: S&P500 Food Price Index")
+```
+
+### Visualization 4 - Moving Averages
+```{r}
+#take a subset of the data for readability of chart
+tsibble_data_subset <- tail(tsibble_data,100)
+
+#create moving averages
+tsibble_data_ma <- tsibble_data_subset |>
+  mutate(
+    `5-MA` = slider::slide_dbl(Close, mean,
+                               .before = 2, .after = 2, .complete = TRUE),
+    '7-MA' = slider::slide_dbl(Close, mean,
+                               .before = 3, .after = 3, .complete = TRUE)            
+    
+  )
+
+#plot the data
+tsibble_data_ma |>
+  autoplot(Close) +
+  geom_line(aes(y = `5-MA`), colour = "orange") +
+  geom_line(aes(y = `7-MA`), colour = "green") +
+  labs(y = "Closing Price ($)",
+       x = "Month",
+       title = "Closing Price for S&P500 Food Price Index")
+```
+
+## Description of Stock Index Time Series:
+
+As we would expect from data on a stock index, there is a clear upward trend over the last 25 years. This would be seen by almost all sectors of the S&P500, where there is flucutation within date ranges, but over a long time horizon (i.e. 20+ years) you will almost certainly see an increasing trend. Surprisingly, the decomposition showed that there is some seasonality to the stock index which isn't as pronounced when looking at the seasonality chart (visualization 3). I can see some seasonality in that there are a few years where there is downturns around July and most years increase the most in December. This dataset is certainly non-stationary as there is a clear increasing trend therefore the mean will change over time (as seen in the moving average chart - visualization 4).
+
+
+# TS Models:
+### Data Manipulation
+We will convert both tables or tibbles to data frames and do a merge to create one data set. Stock data is daily and food data is monthly so we will only look at the close on the last day of each month to do a merge.
+```{r}
+# Convert stock_data_filled from xts to a data frame
+stock_data_filled_df <- data.frame(
+  Month = index(stock_data_filled), 
+  Close = as.vector(stock_data_filled$Close)
+)
+stock_data_filled_df$Month <- as.Date(stock_data_filled_df$Month)
+
+# Get last day of each month for stock data 
+stock_data_filled_df <- stock_data_filled_df %>%
+  group_by(YearMonth = format(Month, "%Y %b")) %>%
+  filter(Month == max(Month)) %>%
+  ungroup() %>%
+  dplyr::select(Month = YearMonth, Close)
+
+# Convert food_prices_adj from tibble to a data frame
+food_prices_adj_df <- as.data.frame(food_prices_adj)
+food_prices_adj_df$Month <- as.character(food_prices_adj_df$Month)
+
+# Merge
+merged_df <- merge(stock_data_filled_df, food_prices_adj_df, by = "Month")
+
+
+# Create a merged tibble
+merged_df <- merged_df %>%
+  mutate(Month = yearmonth(Month)) %>%
+  as_tsibble(index = Month)
+head(merged_df)
+```
+The 'merged_df' now has both variables of interest and Months. We can use this to build our models. Below we will plot the data to see trends visually.  
+
+### Plot Data
+
+```{r}
+
+Adjusted_Plot <- ggplot(merged_df, aes(x = Month, y = Adjusted_Value)) +
+  geom_line(color = "blue") +
+  labs(x = "Month", y = "Adjusted Value", title = "Food Prices") 
+
+Close_Plot <- ggplot(merged_df, aes(x = Month, y = Close)) +
+  geom_line(color = "green") +
+  labs(x = "Month", y = "Close", title = "Stock Index")
+
+grid.arrange(Adjusted_Plot, Close_Plot, ncol = 1)
+```
+
+### ADF Tests
+We need to see if the stock and Food Price data is non-stationary or stationary prior to building an ARIMA or ETS model.
+```{r}
+# ADF for Adjusted_Value
+adf_adjusted <- ur.df(merged_df$Adjusted_Value, type = "none", selectlags = "AIC")
+
+# ADF for Close
+adf_close <- ur.df(merged_df$Close, type = "none", selectlags = "AIC")
+
+summary(adf_adjusted)
+summary(adf_close)
+```
+
+With test statistics of Adjusted_Value = 0.5342 and Close = 0.8202 we can conclude both data sets are non-stationary. We can try differencing them to try to make them stationary.
+
+### Differencing & ADF Re-Run
+```{r}
+# Differencing for Adjusted_Value and Close
+merged_df$diff_adjusted_value <- c(NA, diff(merged_df$Adjusted_Value))
+merged_df$diff_close <- c(NA, diff(merged_df$Close))
+diff_adjusted_value <- diff(merged_df$Adjusted_Value)
+diff_close <- diff(merged_df$Close)
+merged_df <- merged_df[-1, ]
+merged_df$diff_adjusted_value <- diff_adjusted_value
+merged_df$diff_close <- diff_close
+
+# New ADFs for Adjusted and Closed after differencing
+adf_adjusted <- ur.df(merged_df$diff_adjusted_value, type = "none", selectlags = "AIC")
+adf_close <- ur.df(merged_df$diff_close, type = "none", selectlags = "AIC")
+
+summary(adf_adjusted)
+summary(adf_close)
+
+```
+We now have test statistics of Adjusted_Value = -10.49 and Close = -13.73 so our data is now stationary.
+
+
+Our goal is to predict future adjusted values of food prices as accurately as possible. We will create 4 models for forecasting and evaluate them at the end to see what model is best suitable for us. 
+
+The models we are exploring are:
+
+  1. ARIMA Model using differenced Adjusted_Value from the food price data
+  2. ETS Model using differenced Adjusted_Value from the food price data
+  3. Random Forest Model using Close from the stock data
+  4. VAR Modelusing both Adjusted_Value from the food price data and Close from the stock data
+
+## 1) ARIMA model and Predictions using Adjusted_Values
+Here we will use our new differenced Adjusted_Values to create an ARIMA model using 'auto.arima'. This will find the best input combination. Then we will plot 12 months of predictions and summarise the model and compare with others later.
+```{r}
+# Fit ARIMA differenced Adjusted_Value and forecast the next year
+arima_model <- auto.arima(diff_adjusted_value)
+forecast_arima <- forecast(arima_model, h = 12)
+plot(forecast_arima)
+
+summary(arima_model)
+```
+
+## 2) ETS model and Predictions using Adjusted_Values
+Then we will use the same differenced Adjusted_Values to create, plot and summarise an ETS model. 
+```{r}
+# Fit ETS differenced Adjusted_Value and forecast the next year
+ets_model <- ets(diff_adjusted_value)
+forecast_ets <- forecast(ets_model, h = 12)
+plot(forecast_ets)
+
+summary(ets_model)
+```
+
+Next, we will build a Random Forrest model with the US Stock Index Close data as input data.
+
+## 3) Random Forrest Model using Close Data
+
+The data does not need to be stationary for a Random Forrest model, so we will use the Adjusted_Value and and Close columns from the merged_df. We do not need to difference them. We are only using historical stock data as an input. 
+```{r}
+# Split into training and testing
+set.seed(4617)
+samp <- sample(1:nrow(merged_df), 0.8 * nrow(merged_df))
+training <- merged_df[samp, ]
+testing <- merged_df[-samp, ]
+
+# Train
+rf_model <- randomForest(Adjusted_Value ~ Close, data = training)
+print(rf_model)
+
+# Predict
+predictions <- predict(rf_model, newdata = testing)
+
+# Summary Calcs
+rmse <- rmse(testing$Adjusted_Value, predictions)
+mae <- mae(testing$Adjusted_Value, predictions)
+mape <- mape(testing$Adjusted_Value, predictions)
+cat("\nRMSE:", rmse, "\n")
+cat("MAE:", mae, "\n")
+cat("MAPE:", mape * 100)
+
+# Plot
+ggplot() +
+  geom_point(aes(x = testing$Adjusted_Value, y = predictions), color = "blue") + 
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(x = "Actuals", y = "Predicted", title = "Actuals vs Predicted")
+```
+
+
+## 4) VAR Model Using Both Close Data and Adjusted_Values
+
+Finally we will create the VAR model using Stock Close and Food Adjusted_Values as the inputs and compare our results to the previous models. Once we have gathered the summary data we can compare the four models and decide what model is most suitable for our purpose.
+
+```{r}
+# Create time series abd months to predict
+merge_df_ts <- merged_df[, c("Adjusted_Value", "Close")]
+merge_df_ts <- ts(merge_df_ts, frequency = 365, start = c(2001, 1))
+
+# Fit
+var_model <- VAR(merge_df_ts, p = 1)
+
+# Predict
+months <- 12
+forecast_data <- predict(var_model, n.ahead = months)
+
+# Pull out actuals and predicted
+actuals <- as.data.frame(merge_df_ts)
+actuals$Date <- seq(from = as.Date("2001-01-01"), by = "day", length.out = nrow(actuals))
+predicted <- as.data.frame(forecast_data$fcst$Adjusted_Value[, 1])
+predicted$Date <- seq(from = max(actuals$Date) + 1, by = "day", length.out = months)
+
+# Combine actuals and predicted
+actuals$Type <- "Actual"
+predicted$Type <- "Predicted"
+colnames(predicted)[1] <- "Adjusted_Value"
+
+plotdf <- rbind(actuals[, c("Date", "Adjusted_Value", "Type")],
+                   predicted[, c("Date", "Adjusted_Value", "Type")])
+
+# Plot
+ggplot(plotdf, aes(x = Date, y = Adjusted_Value, color = Type)) +
+  geom_line(size = 1) +
+  labs(x = "Date", y = "Adjusted Value", title = "Actuals vs Predicted")
+
+# Get RMSE, MAE, and MAPE
+
+# Align data 
+testing <- tail(actuals, months)
+predictions <- predicted$Adjusted_Value
+
+# Summary Calcs
+summary(var_model)
+rmse_value <- rmse(testing$Adjusted_Value, predictions)
+mae_value <- mae(testing$Adjusted_Value, predictions)
+mape_value <- mape(testing$Adjusted_Value, predictions)
+cat("\nRMSE:", rmse_value, "\n")
+cat("MAE:", mae_value, "\n")
+cat("MAPE:", mape_value * 100)
+```
+
+## Model Evaluation
+
+Summary of Models:
+
+ARIMA:
+- RMSE: 0.3524
+- MAE:  0.2612 
+- MAPE: 333.62
+
+MAPE is very large 333.62 so it struggles with predictions. But RMSE and MAE are lower than the others.
+
+ETS:
+- RMSE: 0.417
+- MAE: 0.317
+- MAPE: 530.53
+
+MAPE is even worse than ARIMA at 530.53. RMSE and MAE are also higher than ARIMA, so ETS is not the best.
+
+Random Forrest:
+- RMSE: 1.617
+- MAE: 1.288
+- MAPE: 1.26
+
+Has a lower MAPE by than the other two at 1.26 but the RMSE and MAE are higher than ARIMA. Explains 50.47% of the variance, so there is plenty of room for improvement.
+
+VAR:
+- RMSE: 0.3725
+- MAE: 0.3299 
+- MAPE: 0.3162
+
+RMSE and MAE is better than Random Forrest and ETS. The MAPE is also almost as good as the Random Forrest. R^2 is very good at 97%.
+
+
+
+At this point VAR appears to be the best option as it is easier to implement into an app and has decent summary metrics compared to the others. Random Forrest appears to be a decent option, and we may be able to improve upon it by using more predictor variables or tuning it. But we would have to develop a model that accurately predicts the future stock data and then use those as values to input to forecast into the future. ETS was by far the worst. ARIMA had the best RMSE and MAE but the MAPE was really bad.
+
+
+# Team Contributions
+
+Jaimie - For the food prices dataset: Data import, TS decomposition, TS visualizations, and description of TS
+
+Morgan - For the stock index dataset: Data import, TS decomposition, TS visualizations, and description of TS
+
+Dustin - Combining two datasets, creating the TS models, creating the TS predictions, and evaluating the models.

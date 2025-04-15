@@ -1,0 +1,10 @@
+name: global_food_price_prediction_2
+title:
+username: mhagerp
+account: mhagerp
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 14519589
+bundleId: 10118300
+url: https://mhagerp.shinyapps.io/global_food_price_prediction_2/
+version: 1
